@@ -6,6 +6,7 @@ using System.Text.RegularExpressions;
 
 var url = "https://picsum.photos/200/300?random=1";
 var downloaded = 0;
+var hashList = new ConcurrentBag<string>();
 
 #region Configuration
 var jsonText = File.ReadAllText("config.json");
@@ -53,42 +54,26 @@ Console.CancelKeyPress += (sender, args) => {
 };
 #endregion End Of Prepare Output Folder and Handle Cancellation
 
-Console.WriteLine($"Downloading {count} images({parallelism} parallel downloads at most)");
-Console.Write($"Progress: {downloaded}/{count}");
-
-var hashList = new ConcurrentBag<string>();
-var tasks2BeCompleted = new List<Task>();
-
-for (var index = 0; index < count; index++)
+#region Task Finished Event Handler
+void TaskFinishedHandler(object sender, TaskFinishedEventArgs args)
 {
-    var downloader = new Downloader(semaphoreSlim);
-    downloader.TaskFinished += (sender, args) =>
+    if (args.HttpResponseMessage.StatusCode == HttpStatusCode.OK)
     {
-        if (args.HttpResponseMessage.StatusCode == HttpStatusCode.OK)
+        lock (syncLock)
         {
-            lock (syncLock)
-            {
-                downloaded++;
-                Console.SetCursorPosition(0, Console.CursorTop);
-                Console.Write($"Progress: {downloaded}/{count}");
-            }
+            downloaded++;
+            Console.SetCursorPosition(0, Console.CursorTop);
+            Console.Write($"Progress: {downloaded}/{count}");
         }
-        else if (args.HttpResponseMessage.StatusCode == HttpStatusCode.Found)
+    }
+    else if (args.HttpResponseMessage.StatusCode == HttpStatusCode.Found)
+    {
+        var location = args.HttpResponseMessage.Headers.Location.ToString();
+        var hmac = Regex.Match(location, "(?<=hmac=)(.*?)$").Value;
+        if (!hashList.Contains(hmac))
         {
-            var location = args.HttpResponseMessage.Headers.Location.ToString();
-            var hmac = Regex.Match(location, "(?<=hmac=)(.*?)$").Value;
-            if (!hashList.Contains(hmac))
-            {
-                hashList.Add(hmac);
-                args.ProceedRedirection();
-            }
-            else
-            {
-                if (args.Instance.RequestCount < maxAttempts)
-                {
-                    args.ReloadUrl();
-                }
-            }
+            hashList.Add(hmac);
+            args.ProceedRedirection();
         }
         else
         {
@@ -97,8 +82,28 @@ for (var index = 0; index < count; index++)
                 args.ReloadUrl();
             }
         }
-    };
+    }
+    else
+    {
+        if (args.Instance.RequestCount < maxAttempts)
+        {
+            args.ReloadUrl();
+        }
+    }
+}
+#endregion End Of Task Finished Event Handler
+
+Console.WriteLine($"Downloading {count} images({parallelism} parallel downloads at most)");
+Console.Write($"Progress: {downloaded}/{count}");
+
+var tasks2BeCompleted = new List<Task>();
+
+for (var index = 0; index < count; index++)
+{
+    var downloader = new Downloader(semaphoreSlim);
+    downloader.TaskFinished += TaskFinishedHandler;
     var task = downloader.DownloadFileAsync(url, $"{path}/{index + 1}.jpg", cancellationTokenSource.Token);
     tasks2BeCompleted.Add(task);
 }
+
 Task.WaitAll(tasks2BeCompleted.ToArray());
